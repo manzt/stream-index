@@ -1,5 +1,5 @@
+use anyhow::{Result};
 use lambda_http::{run, service_fn, Body, Error, Request, Response};
-use anyhow::{Context, Result};
 use noodles::{bam, csi, sam};
 use object_store::{http, ObjectStore};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -68,12 +68,11 @@ async fn get_async_stream_reader(url: &url::Url) -> Result<impl AsyncRead + Unpi
 }
 
 async fn handler(event: Request) -> Result<Response<Body>, Error> {
-    let resp = if let Ok(Some(Ok(url))) = url::Url::parse(&event.uri().to_string())
-        .map(|url| url
-            .query_pairs()
+    let resp = if let Ok(Some(Ok(url))) = url::Url::parse(&event.uri().to_string()).map(|url| {
+        url.query_pairs()
             .find(|(key, _)| key == "target")
             .map(|(_, value)| url::Url::parse(&value))
-    ) {
+    }) {
         let mut reader = get_async_stream_reader(&url).await?;
         let index = build_bam_index(&mut reader).await?;
         let mut writer = Vec::new();
