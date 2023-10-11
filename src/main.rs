@@ -1,7 +1,8 @@
+use lambda_http::{run, service_fn, Body, Error, Request, Response};
 use anyhow::{Context, Result};
 use noodles::{bam, csi, sam};
 use object_store::{http, ObjectStore};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
 
 fn is_coordinate_sorted(header: &sam::Header) -> bool {
@@ -66,30 +67,39 @@ async fn get_async_stream_reader(url: &url::Url) -> Result<impl AsyncRead + Unpi
     Ok(StreamReader::new(stream))
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    if let Some(href) = std::env::args().nth(1) {
-        let url = url::Url::parse(&href)?;
-        let mut stream_reader = get_async_stream_reader(&url).await?;
-        let index = build_bam_index(&mut stream_reader).await?;
-
-        // Write as multi-part stream to other object store...
-        // Use local file system for example
-        let store = object_store::local::LocalFileSystem::new_with_prefix("./tmp")?;
-        let fname = format!("{}.bai", url.path_segments().unwrap().last().unwrap());
-        let path: object_store::path::Path = fname
-            .clone()
-            .try_into()
-            .context("Failed to convert filename into path object")?;
-        {
-            let (_id, mut writer) = store.put_multipart(&path).await?;
-            write_bam_index(&mut writer, &index).await?;
-            writer.flush().await?;
-            writer.shutdown().await?;
-        }
-        println!("Wrote index to ./tmp/{}", fname);
-        Ok(())
+async fn handler(event: Request) -> Result<Response<Body>, Error> {
+    let resp = if let Ok(Some(Ok(url))) = url::Url::parse(&event.uri().to_string())
+        .map(|url| url
+            .query_pairs()
+            .find(|(key, _)| key == "target")
+            .map(|(_, value)| url::Url::parse(&value))
+    ) {
+        let mut reader = get_async_stream_reader(&url).await?;
+        let index = build_bam_index(&mut reader).await?;
+        let mut writer = Vec::new();
+        write_bam_index(&mut writer, &index).await?;
+        Response::builder()
+            .status(200)
+            .header("content-type", "application/octet-stream")
+            .body(Body::Binary(writer))
+            .map_err(Box::new)?
     } else {
-        anyhow::bail!("No URL provided");
-    }
+        Response::builder()
+            .status(400)
+            .body("No URL provided".into())
+            .map_err(Box::new)?
+    };
+    Ok(resp)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        // disable printing the name of the module in every log line.
+        .with_target(false)
+        // disabling time is handy because CloudWatch will add the ingestion time.
+        .without_time()
+        .init();
+    run(service_fn(handler)).await
 }
